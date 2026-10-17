@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#14110f">
+<title>Carrom Aim Assistant</title>
+<style>
+  :root{
+    --bg:#14110f; --panel:#201a16; --panel2:#2c241e; --text:#f5ead8;
+    --muted:#a89a86; --accent:#ffb347; --accent2:#ff7a3d;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+  body{display:flex;flex-direction:column;align-items:center;
+    padding:env(safe-area-inset-top) 8px env(safe-area-inset-bottom)}
+  header{width:100%;text-align:center;padding:8px 0 4px}
+  header h1{margin:0;font-size:1.15rem;letter-spacing:.5px}
+  header h1 span{color:var(--accent)}
+  header p{margin:2px 0 0;font-size:.72rem;color:var(--muted)}
+  #stage{display:flex;justify-content:center;align-items:center;flex:1;width:100%;min-height:0}
+  canvas{touch-action:none;border-radius:14px;box-shadow:0 8px 28px rgba(0,0,0,.6)}
+  #controls{width:100%;max-width:520px;background:var(--panel);border-radius:16px;
+    padding:10px 12px;margin:6px 0 8px;display:flex;flex-direction:column;gap:8px}
+  .row{display:flex;gap:8px;align-items:center}
+  .btn{flex:1;border:0;border-radius:12px;padding:13px 6px;font-size:1.05rem;font-weight:700;
+    color:var(--text);background:var(--panel2);touch-action:manipulation}
+  .btn:active{background:#3a3028;transform:scale(.97)}
+  .btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#2a1606}
+  #readout{flex:1.3;text-align:center;font-variant-numeric:tabular-nums;
+    background:#0f0c0a;border-radius:12px;padding:8px 4px;font-size:.95rem}
+  #readout small{display:block;color:var(--muted);font-size:.65rem}
+  label{font-size:.75rem;color:var(--muted);min-width:64px}
+  input[type=range]{flex:1;accent-color:var(--accent);height:30px}
+  .toggle{display:flex;align-items:center;gap:6px;font-size:.75rem;color:var(--muted)}
+  .toggle input{accent-color:var(--accent);width:18px;height:18px}
+  footer{font-size:.62rem;color:var(--muted);text-align:center;padding-bottom:6px;max-width:520px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Carrom <span>Aim Assistant</span></h1>
+  <p>Practice tool • Drag the striker to move it • Touch the board to aim</p>
+</header>
+
+<div id="stage"><canvas id="board"></canvas></div>
+
+<div id="controls">
+  <div class="row">
+    <button class="btn" id="left">◀ Left</button>
+    <div id="readout"><small>ANGLE</small><span id="angleVal">0.0°</span></div>
+    <button class="btn" id="right">Right ▶</button>
+  </div>
+  <div class="row">
+    <label for="pos">Striker</label>
+    <input type="range" id="pos" min="0" max="100" value="50">
+  </div>
+  <div class="row">
+    <button class="btn primary" id="reset">Reset</button>
+    <label class="toggle"><input type="checkbox" id="bounce" checked> Show wall bounces</label>
+  </div>
+</div>
+
+<footer>Manual aiming practice tool only. It does not read, detect, or control any game screen.</footer>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---------- Board geometry (logical units, board is 1000 x 1000) ----------
+  const SIZE = 1000;
+  const FRAME = 50;                         // wooden frame thickness
+  const MIN = FRAME, MAX = SIZE - FRAME;    // playable area
+  const POCKET_R = 38;
+  const COIN_R = 19;
+  const STRIKER_R = 26;
+  const BASE_Y = 800;                       // baseline of the player's striker
+  const X_MIN = 170, X_MAX = 830;           // striker travel range on baseline
+  const MAX_ANGLE = 80;                     // degrees from straight up
+  const GHOST_R = COIN_R + STRIKER_R;
+
+  const pockets = [
+    {x: MIN + 20, y: MIN + 20}, {x: MAX - 20, y: MIN + 20},
+    {x: MIN + 20, y: MAX - 20}, {x: MAX - 20, y: MAX - 20}
+  ];
+
+  // ---------- State ----------
+  const state = { sx: 500, angle: 0, bounces: true };
+  let coins = [];
+
+  function buildCoins() {
+    coins = [];
+    const cx = 500, cy = 500, d = COIN_R * 2 + 0.5;
+    coins.push({x: cx, y: cy, type: "queen"});
+    for (let i = 0; i < 6; i++) {                       // inner ring
+      const a = i * Math.PI / 3;
+      coins.push({x: cx + Math.cos(a) * d, y: cy + Math.sin(a) * d,
+                  type: i % 2 ? "black" : "white"});
+    }
+    for (let i = 0; i < 6; i++) {                       // outer ring: corners
+      const a = i * Math.PI / 3;
+      coins.push({x: cx + Math.cos(a) * d * 2, y: cy + Math.sin(a) * d * 2,
+                  type: i % 2 ? "white" : "black"});
+    }
+    for (let i = 0; i < 6; i++) {                       // outer ring: edges
+      const a = i * Math.PI / 3 + Math.PI / 6;
+      coins.push({x: cx + Math.cos(a) * d * Math.sqrt(3), y: cy + Math.sin(a) * d * Math.sqrt(3),
+                  type: i % 2 ? "black" : "white"});
+    }
+  }
+
+  // ---------- Canvas setup ----------
+  const canvas = document.getElementById("board");
+  const ctx = canvas.getContext("2d");
+  const header = document.querySelector("header");
+  const controls = document.getElementById("controls");
+  const footer = document.querySelector("footer");
+  let cssSize = 300;
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    const availW = window.innerWidth - 16;
+    const availH = window.innerHeight - header.offsetHeight - controls.offsetHeight
+                   - footer.offsetHeight - 28;
+    cssSize = Math.max(240, Math.floor(Math.min(availW, availH)));
+    canvas.style.width = cssSize + "px";
+    canvas.style.height = cssSize + "px";
+    canvas.width = Math.round(cssSize * dpr);
+    canvas.height = Math.round(cssSize * dpr);
+    ctx.setTransform(canvas.width / SIZE, 0, 0, canvas.height / SIZE, 0, 0);
+    draw();
+  }
+
+  // ---------- Aim tracing ----------
+  function trace() {
+    const segs = [];
+    let hit = null;
+    let p = {x: state.sx, y: BASE_Y};
+    const a = state.angle * Math.PI / 180;
+    let d = {x: Math.sin(a), y: -Math.cos(a)};
+    const lo = MIN + STRIKER_R, hi = MAX - STRIKER_R;
+    const maxSeg = state.bounces ? 3 : 1;
+
+    for (let s = 0; s < maxSeg; s++) {
+      let tWall = Infinity, axis = null;
+      if (d.x > 1e-9) { const t = (hi - p.x) / d.x; if (t < tWall) { tWall = t; axis = "x"; } }
+      if (d.x < -1e-9) { const t = (lo - p.x) / d.x; if (t < tWall) { tWall = t; axis = "x"; } }
+      if (d.y > 1e-9) { const t = (hi - p.y) / d.y; if (t < tWall) { tWall = t; axis = "y"; } }
+      if (d.y < -1e-9) { const t = (lo - p.y) / d.y; if (t < tWall) { tWall = t; axis = "y"; } }
+
+      let tCoin = Infinity, target = null;
+      for (const c of coins) {
+        const fx = p.x - c.x, fy = p.y - c.y;
+        const b = fx * d.x + fy * d.y;
+        const cc = fx * fx + fy * fy - GHOST_R * GHOST_R;
+        const disc = b * b - cc;
+        if (disc < 0) continue;
+        const t = -b - Math.sqrt(disc);
+        if (t > 1e-6 && t < tCoin) { tCoin = t; target = c; }
+      }
+
+      if (target && tCoin < tWall) {
+        const end = {x: p.x + d.x * tCoin, y: p.y + d.y * tCoin};
+        segs.push({a: p, b: end});
+        hit = {ghost: end, coin: target};
+        break;
+      }
+      const end = {x: p.x + d.x * tWall, y: p.y + d.y * tWall};
+      segs.push({a: p, b: end});
+      if (axis === "x") d = {x: -d.x, y: d.y}; else d = {x: d.x, y: -d.y};
+      p = end;
+    }
+    return {segs, hit};
+  }
+
+  // ---------- Drawing ----------
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawBoard() {
+    // wooden frame
+    const wood = ctx.createLinearGradient(0, 0, SIZE, SIZE);
+    wood.addColorStop(0, "#8a5a2b"); wood.addColorStop(.5, "#6b4220"); wood.addColorStop(1, "#8a5a2b");
+    roundRect(0, 0, SIZE, SIZE, 40); ctx.fillStyle = wood; ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,.35)"; ctx.lineWidth = 4; ctx.stroke();
+
+    // playing surface
+    const surf = ctx.createRadialGradient(500, 500, 80, 500, 500, 700);
+    surf.addColorStop(0, "#f6dfae"); surf.addColorStop(1, "#e5c78a");
+    ctx.fillStyle = surf;
+    ctx.fillRect(MIN, MIN, MAX - MIN, MAX - MIN);
+    ctx.strokeStyle = "#3a2410"; ctx.lineWidth = 6;
+    ctx.strokeRect(MIN, MIN, MAX - MIN, MAX - MIN);
+
+    // center rings
+    ctx.strokeStyle = "#a33b2a"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(500, 500, 170, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.arc(500, 500, 70, 0, 7); ctx.stroke();
+    ctx.fillStyle = "#a33b2a";
+    ctx.beginPath(); ctx.arc(500, 500, 10, 0, 7); ctx.fill();
+
+    // baselines on all four sides
+    ctx.strokeStyle = "#3a2410"; ctx.lineWidth = 2.5;
+    const m = 200, off = 150, r = 22;
+    const lines = [
+      [[X_MIN, SIZE - off], [X_MAX, SIZE - off]],
+      [[X_MIN, off], [X_MAX, off]],
+      [[off, X_MIN], [off, X_MAX]],
+      [[SIZE - off, X_MIN], [SIZE - off, X_MAX]]
+    ];
+    // draw top/left/right baselines with end circles, bottom baseline at BASE_Y
+    const bl = [
+      [[X_MIN, BASE_Y], [X_MAX, BASE_Y]],
+      [[X_MIN, SIZE - BASE_Y], [X_MAX, SIZE - BASE_Y]],
+      [[SIZE - BASE_Y, X_MIN], [SIZE - BASE_Y, X_MAX]],
+      [[BASE_Y, X_MIN], [BASE_Y, X_MAX]]
+    ];
+    for (const [a, b] of bl) {
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+      ctx.fillStyle = "#c4553f";
+      for (const e of [a, b]) {
+        ctx.beginPath(); ctx.arc(e[0], e[1], r, 0, 7); ctx.fill(); ctx.stroke();
+      }
+    }
+
+    // diagonal corner arrows
+    ctx.strokeStyle = "#a33b2a"; ctx.lineWidth = 3;
+    const arrows = [[1, 1], [-1, 1], [1, -1], [-1, -1]];
+    for (const [sx, sy] of arrows) {
+      const cx = sx > 0 ? MIN : MAX, cy = sy > 0 ? MIN : MAX;
+      ctx.beginPath();
+      ctx.moveTo(cx + sx * 80, cy + sy * 80);
+      ctx.lineTo(cx + sx * 200, cy + sy * 200);
+      ctx.stroke();
+    }
+
+    // pockets
+    for (const p of pockets) {
+      const g = ctx.createRadialGradient(p.x, p.y, 4, p.x, p.y, POCKET_R);
+      g.addColorStop(0, "#000"); g.addColorStop(.8, "#111"); g.addColorStop(1, "#2a1b10");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(p.x, p.y, POCKET_R, 0, 7); ctx.fill();
+    }
+  }
+
+  function drawCoin(c) {
+    const cols = {
+      white: ["#ffffff", "#d9d0c0"],
+      black: ["#555", "#111"],
+      queen: ["#ff6b6b", "#b3202a"]
+    }[c.type];
+    ctx.fillStyle = "rgba(0,0,0,.25)";
+    ctx.beginPath(); ctx.arc(c.x + 2.5, c.y + 3.5, COIN_R, 0, 7); ctx.fill();
+    const g = ctx.createRadialGradient(c.x - 6, c.y - 6, 2, c.x, c.y, COIN_R);
+    g.addColorStop(0, cols[0]); g.addColorStop(1, cols[1]);
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(c.x, c.y, COIN_R, 0, 7); ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,.45)"; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.strokeStyle = "rgba(0,0,0,.25)";
+    ctx.beginPath(); ctx.arc(c.x, c.y, COIN_R * .6, 0, 7); ctx.stroke();
+  }
+
+  function drawStriker() {
+    const x = state.sx, y = BASE_Y;
+    ctx.fillStyle = "rgba(0,0,0,.3)";
+    ctx.beginPath(); ctx.arc(x + 3, y + 4, STRIKER_R, 0, 7); ctx.fill();
+    const g = ctx.createRadialGradient(x - 8, y - 8, 3, x, y, STRIKER_R);
+    g.addColorStop(0, "#9fd8ff"); g.addColorStop(1, "#2b6fb3");
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, STRIKER_R, 0, 7); ctx.fill();
+    ctx.strokeStyle = "#0d2c4a"; ctx.lineWidth = 2; ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y, STRIKER_R * .55, 0, 7); ctx.stroke();
+    // grab hint ring
+    ctx.strokeStyle = "rgba(255,179,71,.8)"; ctx.setLineDash([6, 6]); ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(x, y, STRIKER_R + 9, 0, 7); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  function drawGuide() {
+    const {segs, hit} = trace();
+    ctx.lineCap = "round";
+    segs.forEach((s, i) => {
+      const alpha = i === 0 ? 1 : 0.55;
+      // glow
+      ctx.strokeStyle = `rgba(255,179,71,${.25 * alpha})`; ctx.lineWidth = 12;
+      ctx.beginPath(); ctx.moveTo(s.a.x, s.a.y); ctx.lineTo(s.b.x, s.b.y); ctx.stroke();
+      // line
+      ctx.strokeStyle = `rgba(255,255,255,${alpha})`; ctx.lineWidth = 3.5;
+      ctx.setLineDash(i === 0 ? [18, 10] : [8, 10]);
+      ctx.beginPath(); ctx.moveTo(s.a.x, s.a.y); ctx.lineTo(s.b.x, s.b.y); ctx.stroke();
+      ctx.setLineDash([]);
+    });
+
+    const last = segs[segs.length - 1];
+    if (hit) {
+      // ghost striker at contact point
+      ctx.strokeStyle = "rgba(159,216,255,.95)"; ctx.lineWidth = 3;
+      ctx.fillStyle = "rgba(159,216,255,.25)";
+      ctx.beginPath(); ctx.arc(hit.ghost.x, hit.ghost.y, STRIKER_R, 0, 7); ctx.fill(); ctx.stroke();
+      // predicted coin direction
+      let dx = hit.coin.x - hit.ghost.x, dy = hit.coin.y - hit.ghost.y;
+      const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;
+      const ex = hit.coin.x + dx * 220, ey = hit.coin.y + dy * 220;
+      ctx.strokeStyle = "#ff7a3d"; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(hit.coin.x, hit.coin.y); ctx.lineTo(ex, ey); ctx.stroke();
+      // arrow head
+      const ah = 16, ang = Math.atan2(dy, dx);
+      ctx.fillStyle = "#ff7a3d";
+      ctx.beginPath();
+      ctx.moveTo(ex + Math.cos(ang) * ah, ey + Math.sin(ang) * ah);
+      ctx.lineTo(ex + Math.cos(ang + 2.5) * ah, ey + Math.sin(ang + 2.5) * ah);
+      ctx.lineTo(ex + Math.cos(ang - 2.5) * ah, ey + Math.sin(ang - 2.5) * ah);
+      ctx.closePath(); ctx.fill();
+      // highlight target coin
+      ctx.strokeStyle = "#ff7a3d"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(hit.coin.x, hit.coin.y, COIN_R + 5, 0, 7); ctx.stroke();
+    } else {
+      ctx.fillStyle = "rgba(255,255,255,.9)";
+      ctx.beginPath(); ctx.arc(last.b.x, last.b.y, 6, 0, 7); ctx.fill();
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, SIZE, SIZE);
+    drawBoard();
+    for (const c of coins) drawCoin(c);
+    drawGuide();
+    drawStriker();
+    document.getElementById("angleVal").textContent =
+      (state.angle > 0 ? "+" : "") + state.angle.toFixed(1) + "°";
+  }
+
+  // ---------- Input ----------
+  const posSlider = document.getElementById("pos");
+
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function setAngle(a) { state.angle = clamp(a, -MAX_ANGLE, MAX_ANGLE); draw(); }
+  function setStrikerX(x) {
+    state.sx = clamp(x, X_MIN, X_MAX);
+    posSlider.value = ((state.sx - X_MIN) / (X_MAX - X_MIN)) * 100;
+    draw();
+  }
+
+  function toLogical(e) {
+    const r = canvas.getBoundingClientRect();
+    return {x: (e.clientX - r.left) / r.width * SIZE, y: (e.clientY - r.top) / r.height * SIZE};
+  }
+
+  let mode = null;
+  canvas.addEventListener("pointerdown", e => {
+    canvas.setPointerCapture(e.pointerId);
+    const p = toLogical(e);
+    const nearStriker = Math.hypot(p.x - state.sx, p.y - BASE_Y) < STRIKER_R + 30;
+    mode = nearStriker ? "move" : "aim";
+    handleMove(p);
+    e.preventDefault();
+  });
+  canvas.addEventListener("pointermove", e => { if (mode) handleMove(toLogical(e)); });
+  const endDrag = () => { mode = null; };
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+
+  function handleMove(p) {
+    if (mode === "move") {
+      setStrikerX(p.x);
+    } else if (mode === "aim") {
+      const dx = p.x - state.sx, dy = BASE_Y - p.y;
+      const a = dy <= 0 ? (dx >= 0 ? MAX_ANGLE : -MAX_ANGLE) : Math.atan2(dx, dy) * 180 / Math.PI;
+      setAngle(a);
+    }
+  }
+
+  posSlider.addEventListener("input", () => {
+    setStrikerX(X_MIN + (posSlider.value / 100) * (X_MAX - X_MIN));
+  });
+
+  // press-and-hold angle buttons
+  function holdButton(id, delta) {
+    const el = document.getElementById(id);
+    let timer = null, delay = null;
+    const step = () => setAngle(Math.round((state.angle + delta) * 10) / 10);
+    const stop = () => { clearTimeout(delay); clearInterval(timer); timer = delay = null; };
+    el.addEventListener("pointerdown", e => {
+      e.preventDefault(); step();
+      delay = setTimeout(() => { timer = setInterval(step, 60); }, 350);
+    });
+    ["pointerup", "pointerleave", "pointercancel"].forEach(ev => el.addEventListener(ev, stop));
+  }
+  holdButton("left", -0.5);
+  holdButton("right", 0.5);
+
+  document.getElementById("reset").addEventListener("click", () => {
+    state.angle = 0; setStrikerX(500);
+  });
+  document.getElementById("bounce").addEventListener("change", e => {
+    state.bounces = e.target.checked; draw();
+  });
+
+  // ---------- Init ----------
+  buildCoins();
+  window.addEventListener("resize", resize);
+  window.addEventListener("orientationchange", () => setTimeout(resize, 200));
+  resize();
+})();
+</script>
+</body>
+</html>
